@@ -132,6 +132,54 @@ def test_batch_routing_jobs_endpoint_submits_multiple_requests() -> None:
         server.shutdown()
 
 
+def test_batch_routing_jobs_round_trip_caller_supplied_custom_ids() -> None:
+    """Without caller custom_ids, results cannot be mapped back to requests
+    on backends that do not preserve submission order (the OpenAI Batch
+    contract does not) -- the submit response never discloses generated ids.
+    """
+    server, port, token = _serve()
+    base = f"http://127.0.0.1:{port}"
+    try:
+        status, job = _request("POST", f"{base}/api/v1/batch_routing_jobs", token, {
+            "requests": [
+                {"messages": [{"role": "user", "content": "one"}], "custom_id": "pair-7"},
+                {"messages": [{"role": "user", "content": "two"}], "custom_id": "pair-42"},
+            ],
+        })
+        assert status == 201
+
+        status, retrieved = _request(
+            "POST", f"{base}/api/v1/batch_routing_jobs/{job['job_id']}/results", token
+        )
+        assert status == 200
+        assert {item["custom_id"] for item in retrieved["results"]} == {"pair-7", "pair-42"}
+    finally:
+        server.shutdown()
+
+
+def test_batch_routing_jobs_reject_invalid_custom_ids() -> None:
+    server, port, token = _serve()
+    base = f"http://127.0.0.1:{port}"
+    try:
+        for bad_requests in (
+            [
+                {"messages": [{"role": "user", "content": "a"}], "custom_id": "dup"},
+                {"messages": [{"role": "user", "content": "b"}], "custom_id": "dup"},
+            ],
+            [{"messages": [{"role": "user", "content": "a"}], "custom_id": "  "}],
+            [{"messages": [{"role": "user", "content": "a"}], "custom_id": "x" * 65}],
+            [{"messages": [{"role": "user", "content": "a"}], "custom_id": 7}],
+        ):
+            status, body = _request(
+                "POST", f"{base}/api/v1/batch_routing_jobs", token,
+                {"requests": bad_requests},
+            )
+            assert status == 400
+            assert body["error"]["code"] == "invalid_request"
+    finally:
+        server.shutdown()
+
+
 def test_cost_report_rejects_unknown_dimension() -> None:
     server, port, token = _serve()
     base = f"http://127.0.0.1:{port}"

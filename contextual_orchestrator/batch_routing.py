@@ -21,6 +21,7 @@ Config/thresholds come from KV, never ``os.getenv``.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import hashlib
 import json
 import time
@@ -230,12 +231,19 @@ class LocalBatchBackend:
         runner: Callable[[List[Dict[str, str]], str], Dict[str, Any]],
         *,
         max_concurrency: int = 1,
+        job_registry: Any = None,
     ) -> None:
         if type(max_concurrency) is not int or max_concurrency < 1:
             raise ValueError("max_concurrency must be a positive integer")
         self._runner = runner
         self.max_concurrency = max_concurrency
-        self._results: Dict[str, List[BatchResultItem]] = {}
+        # Computed results survive a restart when a Valkey-backed registry
+        # is injected; a plain dict preserves the historical behavior.
+        self._results: Dict[str, List[BatchResultItem]] = (
+            job_registry.mapping("local_batch_results", decode=lambda raw: BatchResultItem(**raw))
+            if job_registry is not None
+            else {}
+        )
 
     def submit(self, requests: List[BatchRequest], metadata: Optional[Dict[str, Any]] = None) -> BatchJob:
         """Run every request in-process and stash the results under a job id."""
@@ -288,12 +296,17 @@ class PgLlmBatchBackend:
         endpoint_alias: str = "default",
         endpoint: str = "/v1/chat/completions",
         payload_assembler: Any = None,
+        job_registry: Any = None,
     ) -> None:
         self._client = client
         self._endpoint_alias = endpoint_alias
         self._endpoint = endpoint
         self._assembler = payload_assembler
-        self._jobs: Dict[str, Dict[str, Any]] = {}
+        # Tracked requests survive a restart when a Valkey-backed registry
+        # is injected; a plain dict preserves the historical behavior.
+        self._jobs: Dict[str, Dict[str, Any]] = (
+            job_registry.mapping("pg_llm_batch_jobs") if job_registry is not None else {}
+        )
 
     def _assemble_payload(self, requests: List[BatchRequest]) -> str:
         if self._assembler is not None:
@@ -324,9 +337,14 @@ class PgLlmBatchBackend:
 
         job_payload = self._run(_submit())
         batch_id = job_payload["id"]
+        # Tracked requests are stored as JSON primitives (not dataclass
+        # instances) so the registry can be a JSON-backed Valkey mapping;
+        # retrieve() rebuilds the dataclass view it needs.
         self._jobs[batch_id] = {
             "endpoint_alias": self._endpoint_alias,
-            "requests": {request.custom_id: request for request in requests},
+            "requests": {
+                request.custom_id: dataclasses.asdict(request) for request in requests
+            },
         }
         return BatchJob(
             job_id=batch_id,
@@ -363,7 +381,8 @@ class PgLlmBatchBackend:
             body = (entry.get("response") or {}).get("body", {})
             answer = _extract_answer(body)
             usage = body.get("usage", {}) or {}
-            request = tracked.get(custom_id)
+            raw_request = tracked.get(custom_id)
+            request = BatchRequest(**raw_request) if raw_request else None
             items.append(
                 BatchResultItem(
                     custom_id=custom_id,
@@ -495,10 +514,19 @@ class LocalEmbeddingBatchBackend:
         *,
         token_counter: Any = None,
         dimension: int = _DEFAULT_EMBEDDING_DIMENSION,
+        job_registry: Any = None,
     ) -> None:
         self._embedder = embedder or (lambda text: heuristic_embedding(text, dimension))
         self._token_counter = token_counter
-        self._results: Dict[str, List[EmbeddingBatchResultItem]] = {}
+        # Computed results survive a restart when a Valkey-backed registry
+        # is injected; a plain dict preserves the historical behavior.
+        self._results: Dict[str, List[EmbeddingBatchResultItem]] = (
+            job_registry.mapping(
+                "local_embedding_results", decode=lambda raw: EmbeddingBatchResultItem(**raw)
+            )
+            if job_registry is not None
+            else {}
+        )
 
     def _count_tokens(self, text: str, model: str) -> int:
         if self._token_counter is not None:
@@ -552,12 +580,17 @@ class PgLlmBatchEmbeddingBackend:
         endpoint_alias: str = "default",
         endpoint: str = "/v1/embeddings",
         payload_assembler: Any = None,
+        job_registry: Any = None,
     ) -> None:
         self._client = client
         self._endpoint_alias = endpoint_alias
         self._endpoint = endpoint
         self._assembler = payload_assembler
-        self._jobs: Dict[str, Dict[str, Any]] = {}
+        # Tracked requests survive a restart when a Valkey-backed registry
+        # is injected; a plain dict preserves the historical behavior.
+        self._jobs: Dict[str, Dict[str, Any]] = (
+            job_registry.mapping("pg_llm_embedding_jobs") if job_registry is not None else {}
+        )
 
     def _assemble_payload(self, requests: List[EmbeddingBatchRequest]) -> str:
         if self._assembler is not None:
@@ -590,7 +623,11 @@ class PgLlmBatchEmbeddingBackend:
         batch_id = job_payload["id"]
         self._jobs[batch_id] = {
             "endpoint_alias": self._endpoint_alias,
-            "requests": {request.custom_id: request for request in requests},
+            # JSON primitives, not dataclass instances, so a Valkey-backed
+            # registry can serialize the tracked state (see PgLlmBatchBackend).
+            "requests": {
+                request.custom_id: dataclasses.asdict(request) for request in requests
+            },
             "order": [request.custom_id for request in requests],
         }
         return BatchJob(
@@ -631,7 +668,8 @@ class PgLlmBatchEmbeddingBackend:
             body = (entry.get("response") or {}).get("body", {})
             embedding = _extract_embedding(body)
             usage = body.get("usage", {}) or {}
-            tracked_request = tracked_requests.get(custom_id)
+            raw_request = tracked_requests.get(custom_id)
+            tracked_request = EmbeddingBatchRequest(**raw_request) if raw_request else None
             items.append(
                 EmbeddingBatchResultItem(
                     custom_id=custom_id,

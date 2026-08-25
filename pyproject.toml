@@ -23,6 +23,9 @@ db = [
 fuzz = [
   "atheris==3.1.0; python_version >= '3.12'",
 ]
+queue = [
+  "redis>=5.0",
+]
 
 [tool.contextual_orchestrator]
 object_name_pattern = "two_or_more_words_snake_case"

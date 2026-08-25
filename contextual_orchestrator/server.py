@@ -2649,6 +2649,7 @@ def _validate_batch_requests(body: dict[str, Any], expose_trace: bool) -> list[B
     default_attribution = _validate_attribution(body.get("attribution")) or {}
     default_model = str(body.get("model", "contextual-orchestrator"))
     batch: list[BatchRequest] = []
+    seen_custom_ids: set[str] = set()
     for item in raw_requests:
         if not isinstance(item, dict):
             raise RequestError(400, "invalid_request", "each batch request must be an object")
@@ -2656,12 +2657,34 @@ def _validate_batch_requests(body: dict[str, Any], expose_trace: bool) -> list[B
         attribution = _validate_attribution(item.get("attribution"))
         merged = {**default_attribution, **(attribution or {})}
         mode = _validate_mode(item.get("mode", "auto"))
-        batch.append(BatchRequest(
-            messages=messages,
-            model=str(item.get("model", default_model)),
-            attribution=merged,
-            mode=mode,
-        ))
+        kwargs: dict[str, Any] = {
+            "messages": messages,
+            "model": str(item.get("model", default_model)),
+            "attribution": merged,
+            "mode": mode,
+        }
+        # Caller-supplied custom_id: without it, results cannot be mapped
+        # back to requests on backends that do not preserve submission
+        # order (the OpenAI Batch contract explicitly does not), because
+        # the submit response never discloses the generated ids. Same
+        # bounds as the OpenAI Batch API's custom_id.
+        custom_id = item.get("custom_id")
+        if custom_id is not None:
+            if not isinstance(custom_id, str) or not custom_id.strip():
+                raise RequestError(
+                    400, "invalid_request", "custom_id must be a non-empty string"
+                )
+            if len(custom_id) > 64:
+                raise RequestError(
+                    400, "invalid_request", "custom_id must be at most 64 characters"
+                )
+            if custom_id in seen_custom_ids:
+                raise RequestError(
+                    400, "invalid_request", "custom_id values must be unique within a batch"
+                )
+            seen_custom_ids.add(custom_id)
+            kwargs["custom_id"] = custom_id
+        batch.append(BatchRequest(**kwargs))
     return batch
 
 
