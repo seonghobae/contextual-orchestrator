@@ -55,6 +55,20 @@ Extraction triggers:
 Until those triggers exist, Ponytail recommends strengthening the current
 single-repo product instead of splitting it.
 
+## Structured output schema validation (2026-08-26)
+
+PR #891 adds strict provider-response JSON Schema validation at the gateway's
+structured-output boundary. That seam accepts provider-controlled bytes plus
+caller-supplied schema, so Ponytail requires an existing maintained validator
+instead of custom schema code.
+
+| Area | Library/pattern | Decision | Evidence |
+|---|---|---|---|
+| Structured output validation | [`jsonschema`](https://python-jsonschema.readthedocs.io/) | Use the maintained JSON Schema validator already aligned with the repository's OpenAPI/JSON Schema contract work. The gateway imports `validator_for` directly and fails closed on invalid JSON or schema violations. | The library exposes draft-aware validator selection and schema validation helpers for Python JSON Schema implementations. |
+
+Skipped: handwritten schema walkers, ad hoc regex validation, and a second
+framework-specific validator layer.
+
 ## Role reasoning-effort profiles (2026-08-16)
 
 Issue #568 needs a provider-neutral `reasoning_effort_profile` and an

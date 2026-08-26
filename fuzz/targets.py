@@ -8,7 +8,7 @@ and asserts the invariants that must hold *for arbitrary input*:
   ``AttributeError``, ``RecursionError``, ``SystemError`` or a hang; and
 * structural invariants on any successful result (shape, types, idempotence).
 
-CodeGraph (``codegraph explore``) surfaced these eight surfaces as the ones that
+CodeGraph (``codegraph explore``) surfaced these nine surfaces as the ones that
 consume untrusted bytes/JSON:
 
 1. ``server._coerce_json`` / ``_validate_mode`` / ``_validate_messages`` /
@@ -29,6 +29,9 @@ consume untrusted bytes/JSON:
    role-compute JSON. Must raise ``EffortProfileError`` / ``TypeError`` /
    ``ValueError`` or return a finite profile. Never crash on NaN, bool-as-
    number, or unknown keys.
+9. ``orchestrator._structured_output_error`` -- untrusted provider JSON text
+   plus caller-supplied JSON Schema. Must return a bounded contract error or
+   ``None`` without crashing the gateway.
 
 No network, no secrets, no filesystem: every target runs fully offline.
 """
@@ -49,6 +52,7 @@ from contextual_orchestrator.orchestrator import (
     ModelAgent,
     TaskOrchestrator,
     _parse_model_judge_reply,
+    _structured_output_error,
     chat_completion_chunks,
     redact_text,
     redact_value,
@@ -373,3 +377,17 @@ def exercise_model_judge_reply(reply: str) -> None:
         return
     assert decision in {"ACCEPT", "REJECT"}
     assert isinstance(reason, str) and reason.strip()
+
+
+def exercise_structured_output_contract(value: Any) -> None:
+    """Drive strict structured-output validation over arbitrary schema/input."""
+    if not isinstance(value, dict):
+        return
+    content = value.get("content")
+    if not isinstance(content, str):
+        try:
+            content = json.dumps(content)
+        except (TypeError, ValueError):
+            content = ""
+    result = _structured_output_error(content, value.get("response_format"))
+    assert result in {None, "invalid_json", "schema_missing", "schema_violation"}

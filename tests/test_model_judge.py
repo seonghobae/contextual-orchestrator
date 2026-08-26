@@ -500,6 +500,69 @@ def test_strict_schema_validation_and_repair_stay_in_the_conduct_trace() -> None
     assert _structured_output_error('{"input_count":6}', response_format) == "schema_violation"
 
 
+def test_schema_missing_fails_before_repair_attempt() -> None:
+    orchestrator, _ = _orch("unused")
+    response_format = {
+        "type": "json_schema",
+        "json_schema": {"name": "exact_count", "strict": True},
+    }
+    invalid = {"choices": [{"message": {"content": '{"input_count":6}'}}]}
+
+    with patch.object(orchestrator.client, "proxy_send", return_value=invalid) as proxy:
+        with pytest.raises(
+            orchestrator_module.ProviderResponseError,
+            match="response_format\\.json_schema is missing a schema",
+        ):
+            orchestrator.proxy_completion(
+                {
+                    "model": "model-x",
+                    "messages": [{"role": "user", "content": "classify ten items"}],
+                    "response_format": response_format,
+                },
+                single_agent=False,
+            )
+
+    assert proxy.call_count == 1
+
+
+def test_repair_budget_gate_blocks_second_provider_call() -> None:
+    orchestrator, _ = _orch("unused")
+    orchestrator.budget_max_output_tokens = 2
+    response_format = {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "exact_count",
+            "strict": True,
+            "schema": {
+                "type": "object",
+                "properties": {"input_count": {"const": 10}},
+                "required": ["input_count"],
+                "additionalProperties": False,
+            },
+        },
+    }
+    invalid = {
+        "choices": [{"message": {"content": '{"input_count":6}'}}],
+        "usage": {"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5},
+    }
+    with patch.object(
+        orchestrator,
+        "conduct",
+        return_value={"trace": [], "answer": "", "verification": None},
+    ), patch.object(orchestrator.client, "proxy_send", return_value=invalid) as proxy:
+        with pytest.raises(orchestrator_module.BudgetExceededError, match="spend budget exceeded"):
+            orchestrator.proxy_completion(
+                {
+                    "model": "model-x",
+                    "messages": [{"role": "user", "content": "classify ten items"}],
+                    "response_format": response_format,
+                },
+                single_agent=False,
+            )
+
+    assert proxy.call_count == 1
+
+
 def test_fast_mlsirm_judge_contract_does_not_pass_threshold_to_judge_call() -> None:
     class _Judge:
         def __init__(self, _orchestrator, *, mode: str, accept_threshold: float) -> None:

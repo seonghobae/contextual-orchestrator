@@ -25,6 +25,7 @@ from fuzz.targets import (
     exercise_reasoning_effort_profile,
     exercise_redaction,
     exercise_request_body,
+    exercise_structured_output_contract,
 )
 
 # Keep per-test wall time small so the suite stays cheap in CI.
@@ -136,3 +137,9 @@ def test_model_judge_parser_rejects_or_validates_arbitrary_text(reply: str) -> N
 @given(_json_values)
 def test_reasoning_effort_profile_never_crashes(value: object) -> None:
     exercise_reasoning_effort_profile(value)
+
+
+@_SETTINGS
+@given(_json_values)
+def test_structured_output_contract_never_crashes(value: object) -> None:
+    exercise_structured_output_contract(value)

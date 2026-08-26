@@ -3342,7 +3342,22 @@ class TaskOrchestrator:
         repair_step: dict[str, Any] | None = None
         response_format = chat_body.get("response_format")
         contract_error = _structured_output_error(synthesis_output, response_format)
+        if contract_error == "schema_missing":
+            raise ProviderResponseError(
+                "response_format.json_schema is missing a schema"
+            )
         if contract_error is not None:
+            repair_output_tokens = _step_output_token_count(synthesis_step)
+            repair_output_cost = 0.0
+            if final_agent.model in self.price_per_million:
+                repair_output_cost = round(
+                    repair_output_tokens / 1_000_000 * self.price_per_million[final_agent.model],
+                    6,
+                )
+            self._raise_if_spend_budget_exceeded(
+                additional_output_tokens=in_flight_tokens + repair_output_tokens,
+                additional_cost_usd=round(in_flight_cost + repair_output_cost, 6),
+            )
             repair_upstream = copy.deepcopy(upstream)
             repair_instruction = (
                 "The prior synthesis violated the caller's strict JSON Schema "
