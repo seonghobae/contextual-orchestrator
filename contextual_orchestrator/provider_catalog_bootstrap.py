@@ -297,9 +297,18 @@ def bootstrap_provider_catalog_runtime(
         privacy_assessments: list[PrivacyPolicyAssessment] = []
         if analyze_privacy_policies:
             live_models, privacy_assessments = privacy_analysis(live_models)
-        # The store evidence log is shared process state. Keep the offset,
-        # refresh writes, and tail capture in one atomic boundary so concurrent
-        # bootstrap reports cannot claim one another's provider attempts.
+        assessments_by_account: dict[
+            tuple[str, str], list[PrivacyPolicyAssessment]
+        ] = {}
+        for assessment in privacy_assessments:
+            assessments_by_account.setdefault(
+                (assessment.subject_provider, assessment.subject_credential), []
+            ).append(assessment)
+        # The store evidence log and privacy evidence writes are shared process
+        # state. Keep the offset, refresh writes, privacy upserts, and tail
+        # capture in one atomic boundary so concurrent bootstraps cannot
+        # resurrect stale policy evidence after a newer refresh removed its
+        # source rows.
         with _CATALOG_REFRESH_EVIDENCE_LOCK:
             evidence_offset = len(store.refresh_evidence())
             snapshot = refresh_persisted_provider_catalog(
@@ -309,16 +318,15 @@ def bootstrap_provider_catalog_runtime(
                 discovered=live_models,
                 errors=errors,
             )
+            for source in source_tuple:
+                account_assessments = assessments_by_account.get(
+                    _source_key(source), []
+                )
+                if account_assessments:
+                    store.record_privacy_assessment_success(
+                        source, account_assessments
+                    )
             catalog_refreshes = store.refresh_evidence()[evidence_offset:]
-        assessments_by_account: dict[tuple[str, str], list[PrivacyPolicyAssessment]] = {}
-        for assessment in privacy_assessments:
-            assessments_by_account.setdefault(
-                (assessment.subject_provider, assessment.subject_credential), []
-            ).append(assessment)
-        for source in source_tuple:
-            account_assessments = assessments_by_account.get(_source_key(source), [])
-            if account_assessments:
-                store.record_privacy_assessment_success(source, account_assessments)
         privacy_assessment_count = (
             sum(
                 len(store.privacy_assessments(source))

@@ -1,5 +1,28 @@
 # Contextual Orchestrator: Product & Technical Gap Baseline
 
+## 2026-08-30 PR #868 privacy-evidence ordering fix
+
+The configured provider catalog bootstrap was persisting grounded privacy/ZDR
+assessments after releasing the shared refresh lock. That allowed an older
+refresh to restore stale policy evidence after a newer refresh had already
+replaced the same provider account with a model set that removed the policy
+source row, leaving persisted evidence out of sync with the latest catalog
+snapshot.
+
+This cycle keeps refresh writes, privacy-assessment upserts, and refresh-
+evidence tail capture inside the same `_CATALOG_REFRESH_EVIDENCE_LOCK`
+critical section. A concurrency regression now delays the stale assessment
+write while a second refresh removes the source; the final persisted privacy
+evidence stays empty, matching the later refresh. Focused branch verification
+on Sunday, August 30, 2026 used `uv run pytest` for
+`tests/test_provider_catalog_bootstrap.py`,
+`tests/test_privacy_policy_analysis.py`,
+`tests/test_provider_catalog_store.py`,
+`tests/test_provider_catalog_store_boundaries.py`, and
+`tests/test_model_discovery_boundaries.py`: `63 passed, 1 skipped` in 32.38s.
+This is branch evidence only until protected hosted checks run on the exact PR
+head.
+
 ## 2026-08-30 hourly loop: #868 test-mock fix, #857 narrow hardening, #906 stale-base merge
 
 Fresh status check confirmed #868/#911/#912 were still `BLOCKED` purely on the

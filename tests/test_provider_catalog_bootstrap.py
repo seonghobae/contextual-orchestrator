@@ -5,6 +5,7 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 import threading
+import time
 
 import pytest
 
@@ -276,6 +277,97 @@ def test_concurrent_bootstraps_report_only_their_own_refresh_evidence() -> None:
             ["openrouter_openrouter_api_key"],
         ]
         assert len(store.refresh_evidence()) == 2
+    finally:
+        set_backend(None)
+
+
+def test_concurrent_bootstrap_cannot_restore_stale_privacy_evidence() -> None:
+    """A later refresh must win over an older delayed privacy write."""
+    set_backend(InMemoryCredentialBackend())
+    try:
+        source = _source("openai", "OPENAI_API_KEY")
+        stale_refresh_recorded = threading.Event()
+
+        class _LaggyStore(InMemoryProviderCatalogStore):
+            def record_success(
+                self,
+                source: ProviderModelSource,
+                models: list[DiscoveredModel],
+                *,
+                eligible_model_ids: set[str],
+                serving_tags: dict[str, tuple[str, ...]],
+            ) -> None:
+                super().record_success(
+                    source,
+                    models,
+                    eligible_model_ids=eligible_model_ids,
+                    serving_tags=serving_tags,
+                )
+                if any(model.privacy_policy_urls for model in models):
+                    stale_refresh_recorded.set()
+
+            def record_privacy_assessment_success(
+                self,
+                source: ProviderModelSource,
+                assessments: list[PrivacyPolicyAssessment],
+            ) -> None:
+                if any(item.evidence_quote == "Stale quote." for item in assessments):
+                    time.sleep(0.05)
+                super().record_privacy_assessment_success(source, assessments)
+
+        stale_model = _model(source, "gpt-live")
+        stale_model = type(stale_model)(
+            **{
+                **stale_model.__dict__,
+                "privacy_policy_urls": ("https://provider.example/privacy",),
+            }
+        )
+        current_model = _model(source, "gpt-live")
+        stale_evidence = PrivacyPolicyAssessment(
+            subject_provider=source.provider_name,
+            subject_credential=source.credential_name,
+            subject_model=stale_model.model_id,
+            source_url="https://provider.example/privacy",
+            zero_data_retention_available=True,
+            supports_no_training=True,
+            supports_no_prompt_retention=True,
+            evidence_quote="Stale quote.",
+            analyzer_provider="openrouter",
+            analyzer_model="zdr-analyzer",
+            observed_at=datetime(2026, 8, 30, tzinfo=timezone.utc),
+        )
+        store = _LaggyStore()
+
+        def bootstrap_stale() -> None:
+            bootstrap_provider_catalog_runtime(
+                environ=_environment(),
+                catalog_store=store,
+                sources=(source,),
+                discovery=lambda _sources: ([stale_model], []),
+                analyze_privacy_policies=True,
+                privacy_analysis=lambda models: (list(models), [stale_evidence]),
+                model_limit=1,
+            )
+
+        def bootstrap_current() -> None:
+            def discover(_sources):
+                assert stale_refresh_recorded.wait(timeout=5)
+                return [current_model], []
+
+            bootstrap_provider_catalog_runtime(
+                environ=_environment(),
+                catalog_store=store,
+                sources=(source,),
+                discovery=discover,
+                analyze_privacy_policies=True,
+                privacy_analysis=lambda models: (list(models), []),
+                model_limit=1,
+            )
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            tuple(executor.map(lambda fn: fn(), (bootstrap_stale, bootstrap_current)))
+
+        assert store.privacy_assessments(source) == ()
     finally:
         set_backend(None)
 
